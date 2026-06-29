@@ -2,6 +2,7 @@
 
 from datetime import date
 from pathlib import Path
+import sqlite3
 
 from database.modelo_v01 import (
     DEPENDENCIA_TODAS_PRINCIPALES,
@@ -1608,6 +1609,233 @@ def actualizar_estados_partidas(
     return {
         "actualizadas": len(ids),
         "estado_operativo": estados_departamento[-1],
+    }
+
+
+ESTADOS_IMPORTACION_AVANCE = {
+    "no_iniciada",
+    "en_proceso",
+    "terminada",
+    "observada",
+    "bloqueada",
+    "verificada",
+    "no_aplica",
+}
+
+
+def obtener_plantilla_importacion_avance(
+    ruta_db=RUTA_DB_PREDETERMINADA,
+) -> list[dict]:
+    """Devuelve las partidas existentes para completar una carga inicial Excel."""
+    departamentos = listar_departamentos_seleccionables(ruta_db)
+    registros = []
+    for departamento in departamentos:
+        try:
+            avance = obtener_avance_departamento(departamento["id"], ruta_db)
+        except ValueError:
+            continue
+        for partida in avance["partidas"]:
+            registros.append(
+                {
+                    "torre": avance["torre"],
+                    "piso": avance["piso"],
+                    "departamento": avance["numero"],
+                    "tipologia": avance["tipologia"],
+                    "recinto": partida["recinto"],
+                    "partida": partida["partida"],
+                    "estado": partida["estado"],
+                    "responsable": partida["responsable"] or "",
+                    "comentario": partida["comentario"] or "",
+                    "fecha_actualizacion": partida["fecha_ultima_actualizacion"] or "",
+                }
+            )
+    return registros
+
+
+def _normalizar_texto_importacion(valor) -> str:
+    if valor is None:
+        return ""
+    texto = str(valor).strip()
+    if texto.lower() == "nan":
+        return ""
+    return texto
+
+
+def _estado_importacion(valor: str) -> str:
+    texto = _normalizar_texto_importacion(valor).casefold()
+    equivalencias = {
+        "no iniciada": "no_iniciada",
+        "no_iniciada": "no_iniciada",
+        "en proceso": "en_proceso",
+        "en_proceso": "en_proceso",
+        "terminada": "terminada",
+        "observada": "observada",
+        "bloqueada": "bloqueada",
+        "verificada": "verificada",
+        "no aplica": "no_aplica",
+        "no_aplica": "no_aplica",
+    }
+    return equivalencias.get(texto, texto)
+
+
+def _fecha_importacion_iso(valor) -> str | None:
+    texto = _normalizar_texto_importacion(valor)
+    if not texto:
+        return None
+    try:
+        return date.fromisoformat(texto[:10]).isoformat()
+    except ValueError:
+        raise ValueError("fecha_actualizacion debe tener formato YYYY-MM-DD.")
+
+
+def _buscar_estado_partida_importacion(conexion, fila: dict):
+    return conexion.execute(
+        """
+        SELECT
+            epd.id AS estado_partida_id,
+            d.id AS departamento_id
+        FROM estado_partida_departamento epd
+        JOIN departamentos d ON d.id = epd.departamento_id
+        JOIN torres t ON t.id = d.torre_id
+        LEFT JOIN tipologias tip ON tip.id = d.tipologia_id
+        JOIN recinto_partida rp ON rp.id = epd.recinto_partida_id
+        JOIN tipologia_recinto tr ON tr.id = rp.tipologia_recinto_id
+        JOIN partidas p ON p.id = rp.partida_id
+        WHERE t.nombre = ?
+          AND d.piso = ?
+          AND d.numero = ?
+          AND COALESCE(tip.nombre, '') = ?
+          AND tr.nombre_recinto = ?
+          AND p.nombre = ?
+        """,
+        (
+            fila["torre"],
+            int(fila["piso"]),
+            fila["departamento"],
+            fila["tipologia"],
+            fila["recinto"],
+            fila["partida"],
+        ),
+    ).fetchone()
+
+
+def importar_avance_desde_filas(
+    filas: list[dict],
+    usuario_id: int,
+    ruta_db=RUTA_DB_PREDETERMINADA,
+) -> dict:
+    """Importa estados operativos existentes desde filas validadas de Excel."""
+    errores = []
+    actualizadas = 0
+    columnas_requeridas = {
+        "torre",
+        "piso",
+        "departamento",
+        "tipologia",
+        "recinto",
+        "partida",
+        "estado",
+        "responsable",
+        "comentario",
+        "fecha_actualizacion",
+    }
+
+    with sesion(ruta_db) as conexion:
+        responsables = {
+            fila["nombre"]: fila["id"]
+            for fila in conexion.execute(
+                "SELECT id, nombre FROM responsables WHERE activo = 1"
+            ).fetchall()
+        }
+
+    for indice, fila_original in enumerate(filas, start=2):
+        faltantes = columnas_requeridas - set(fila_original)
+        if faltantes:
+            errores.append(
+                {
+                    "fila": indice,
+                    "error": "Faltan columnas: " + ", ".join(sorted(faltantes)),
+                }
+            )
+            continue
+
+        fila = {
+            columna: _normalizar_texto_importacion(fila_original.get(columna))
+            for columna in columnas_requeridas
+        }
+        try:
+            estado = _estado_importacion(fila["estado"])
+            if estado not in ESTADOS_IMPORTACION_AVANCE:
+                raise ValueError("estado no es valido.")
+            if estado == "observada" and not fila["comentario"]:
+                raise ValueError("comentario es obligatorio para Observada.")
+            if estado == "bloqueada":
+                raise ValueError(
+                    "Bloqueada no puede importarse con esta plantilla; "
+                    "requiere causa, responsable y fecha compromiso."
+                )
+            fecha_actualizacion = _fecha_importacion_iso(
+                fila["fecha_actualizacion"]
+            )
+            with sesion(ruta_db) as conexion:
+                estado_partida = _buscar_estado_partida_importacion(conexion, fila)
+            if estado_partida is None:
+                raise ValueError(
+                    "No existe la combinacion departamento/recinto/partida."
+                )
+            estado_partida_id = estado_partida["estado_partida_id"]
+            responsable_id = None
+            if fila["responsable"]:
+                responsable_id = responsables.get(fila["responsable"])
+                if responsable_id is None:
+                    raise ValueError("responsable no existe o esta inactivo.")
+            actualizar_estado_partida(
+                estado_partida_id=estado_partida_id,
+                nuevo_estado=estado,
+                usuario_id=usuario_id,
+                responsable_id=responsable_id,
+                comentario=fila["comentario"],
+                ruta_db=ruta_db,
+            )
+            if fecha_actualizacion:
+                with sesion(ruta_db) as conexion_fecha:
+                    conexion_fecha.execute(
+                        """
+                        UPDATE estado_partida_departamento
+                        SET fecha_ultima_actualizacion = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            fecha_actualizacion,
+                            estado_partida_id,
+                        ),
+                    )
+                    conexion_fecha.execute(
+                        """
+                        UPDATE historial_partida_departamento
+                        SET fecha = ?
+                        WHERE id = (
+                            SELECT id
+                            FROM historial_partida_departamento
+                            WHERE estado_partida_id = ?
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                        """,
+                        (
+                            fecha_actualizacion,
+                            estado_partida_id,
+                        ),
+                    )
+            actualizadas += 1
+        except (ValueError, sqlite3.IntegrityError) as error:
+            errores.append({"fila": indice, "error": str(error)})
+
+    return {
+        "filas_procesadas": len(filas),
+        "filas_actualizadas": actualizadas,
+        "filas_con_error": len(errores),
+        "errores": errores,
     }
 
 

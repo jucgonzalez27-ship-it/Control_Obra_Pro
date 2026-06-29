@@ -3,6 +3,7 @@
 import sqlite3
 from datetime import date, timedelta
 from html import escape
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
@@ -44,6 +45,7 @@ from database.servicios import (
     obtener_ficha_dashboard_departamento,
     obtener_historial_partidas_departamento,
     obtener_historial_restriccion,
+    obtener_plantilla_importacion_avance,
     obtener_checklist_tipologia,
     obtener_avance_departamento,
     obtener_indicadores,
@@ -62,6 +64,7 @@ from database.servicios import (
     obtener_resumen_pisos,
     obtener_resumen_pendientes_especialidad,
     obtener_resumen_configuracion,
+    importar_avance_desde_filas,
     preparar_base,
 )
 from presentacion import clave_numero_departamento, estado_corto, nombre_del_nivel
@@ -153,6 +156,17 @@ def descargar_csv(registros: list[dict], nombre_archivo: str):
     )
 
 
+def crear_excel_descarga(registros: list[dict]) -> bytes:
+    salida = BytesIO()
+    with pd.ExcelWriter(salida, engine="openpyxl") as escritor:
+        pd.DataFrame(registros).to_excel(
+            escritor,
+            index=False,
+            sheet_name="avance",
+        )
+    return salida.getvalue()
+
+
 def mostrar_marca_sidebar():
     st.sidebar.markdown(
         """
@@ -166,18 +180,42 @@ def mostrar_marca_sidebar():
 
 
 def mostrar_inicio():
-    st.title("CopBuilder")
-    st.caption("Dashboard operativo de avance, bloqueos y liberación")
-
+    usuario = st.session_state.get("usuario_activo")
+    departamentos = obtener_dashboard_departamentos()
     resumen_dashboard = obtener_resumen_dashboard()
-    columnas = st.columns(7)
-    columnas[0].metric("Departamentos", resumen_dashboard["total"])
-    columnas[1].metric("Avance oficial", f'{resumen_dashboard["avance_oficial"]}%')
-    columnas[2].metric("Avance declarado", f'{resumen_dashboard["avance_declarado"]}%')
-    columnas[3].metric("Bloqueados", resumen_dashboard["bloqueados"])
-    columnas[4].metric("Observados", resumen_dashboard["observados"])
-    columnas[5].metric("Liberables", resumen_dashboard["liberables"])
-    columnas[6].metric("Vencidas", resumen_dashboard["vencidas"])
+    pendientes_verificar = [
+        departamento
+        for departamento in departamentos
+        if departamento["avance_declarado"] > departamento["avance_oficial"]
+    ]
+    avance_alto = [
+        departamento
+        for departamento in departamentos
+        if departamento["estado"] != "Liberable"
+        and departamento["avance_declarado"] >= 80
+    ]
+
+    obra_activa = departamentos[0]["obra"] if departamentos else "Sin obra activa"
+    torre_activa = departamentos[0]["torre"] if departamentos else "Sin torre activa"
+    usuario_activo = usuario["nombre"] if usuario else "Sin usuario activo"
+
+    st.markdown(
+        f"""
+        <section class="cop-hero">
+            <div>
+                <span class="cop-kicker">Centro de Operaciones</span>
+                <h1>CopBuilder</h1>
+                <p>Prioridad diaria para avance, verificación y bloqueos.</p>
+            </div>
+            <div class="cop-context-grid">
+                <div><span>Obra activa</span><strong>{escape(obra_activa)}</strong></div>
+                <div><span>Torre activa</span><strong>{escape(torre_activa)}</strong></div>
+                <div><span>Usuario activo</span><strong>{escape(usuario_activo)}</strong></div>
+            </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
     resumen = obtener_resumen_configuracion()
     if not resumen["departamentos"]:
@@ -186,10 +224,52 @@ def mostrar_inicio():
             "la torre piloto y sus departamentos."
         )
 
-    departamentos = obtener_dashboard_departamentos()
     if not departamentos:
         st.write("Todavía no hay departamentos registrados.")
         return
+
+    st.subheader("Acciones prioritarias")
+    acciones = [
+        {
+            "titulo": "Pendientes de verificar",
+            "valor": len(pendientes_verificar),
+            "detalle": "Departamentos con avance declarado mayor al oficial.",
+            "accion": "Revisar y verificar partidas terminadas.",
+        },
+        {
+            "titulo": "Departamentos bloqueados",
+            "valor": resumen_dashboard["bloqueados"],
+            "detalle": "Departamentos con bloqueo activo o restricción bloqueante.",
+            "accion": "Resolver responsable, causa y compromiso.",
+        },
+        {
+            "titulo": "Avance alto",
+            "valor": len(avance_alto),
+            "detalle": "Departamentos con avance declarado sobre 80%.",
+            "accion": "Priorizar revisión para cierre operativo.",
+        },
+    ]
+    columnas_acciones = st.columns(3)
+    for columna, accion in zip(columnas_acciones, acciones):
+        with columna:
+            st.markdown(
+                f"""
+                <div class="cop-action-card">
+                    <span>{escape(accion["titulo"])}</span>
+                    <strong>{accion["valor"]}</strong>
+                    <p>{escape(accion["detalle"])}</p>
+                    <em>{escape(accion["accion"])}</em>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.subheader("KPIs")
+    columnas = st.columns(4)
+    columnas[0].metric("Avance promedio", f'{resumen_dashboard["avance_oficial"]}%')
+    columnas[1].metric("Liberables", resumen_dashboard["liberables"])
+    columnas[2].metric("Bloqueados", resumen_dashboard["bloqueados"])
+    columnas[3].metric("Pendientes de verificar", len(pendientes_verificar))
 
     st.subheader("Filtros")
     filtros = st.columns([1, 1, 1, 1])
@@ -270,6 +350,9 @@ def mostrar_inicio():
             for departamento in departamentos_filtrados
             if str(departamento["departamento"]) in departamentos_con_especialidad
         ]
+
+    st.subheader("Tarjetas de departamentos")
+    mostrar_tarjetas_departamentos_operativas(departamentos_filtrados[:24])
 
     izquierda, derecha = st.columns([1.45, 1])
     with izquierda:
@@ -372,6 +455,61 @@ def filtrar_por_recinto_partida(
         if coincide_recinto and coincide_partida:
             filtrados.append(departamento)
     return filtrados
+
+
+def proxima_accion_dashboard(departamento: dict) -> str:
+    if departamento["estado"] == "Bloqueado":
+        return "Resolver bloqueo"
+    if departamento["estado"] == "Liberable":
+        return "Liberar departamento"
+    if departamento["avance_declarado"] > departamento["avance_oficial"]:
+        return "Verificar avance"
+    if departamento["avance_declarado"] >= 80:
+        return "Revisar cierre"
+    if departamento["estado"] == "Sin revisar":
+        return "Iniciar revisión"
+    return "Continuar avance"
+
+
+def mostrar_tarjetas_departamentos_operativas(departamentos: list[dict]):
+    if not departamentos:
+        st.info("No hay departamentos para mostrar con esos filtros.")
+        return
+
+    colores = {
+        "Bloqueado": "is-blocked",
+        "Observado": "is-risk",
+        "Liberable": "is-ready",
+        "En proceso": "is-progress",
+        "Sin revisar": "is-pending",
+    }
+    tarjetas = []
+    for departamento in departamentos:
+        estado = departamento["estado"]
+        tarjetas.append(
+            f"""
+            <article class="cop-dept-card {colores.get(estado, "is-pending")}">
+                <div class="cop-dept-card__top">
+                    <strong>Depto {escape(str(departamento["departamento"]))}</strong>
+                    <span>{escape(estado)}</span>
+                </div>
+                <div class="cop-dept-card__progress">
+                    <b>{departamento["avance_oficial"]}%</b>
+                    <small>avance oficial</small>
+                </div>
+                <div class="cop-dept-card__meta">
+                    <span>{escape(nombre_del_nivel(departamento["piso"]))}</span>
+                    <span>Declarado {departamento["avance_declarado"]}%</span>
+                </div>
+                <em>{escape(proxima_accion_dashboard(departamento))}</em>
+            </article>
+            """
+        )
+
+    st.markdown(
+        '<div class="cop-dept-grid">' + "".join(tarjetas) + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def mostrar_matriz_dashboard(departamentos: list[dict]):
@@ -1059,6 +1197,47 @@ def opciones_estado_para_usuario(usuario: dict) -> dict[str, str]:
     return opciones
 
 
+def texto_dependencias_partida(recinto: str, partida: str) -> str:
+    dependencias = obtener_dependencias_criticas_partida(recinto, partida)
+    if not dependencias:
+        return "Sin dependencia critica"
+    return ", ".join(
+        f'{dependencia["partida_dependencia"]} ({dependencia["condicion"]})'
+        for dependencia in dependencias
+    )
+
+
+def alternar_partida_terreno(clave_seleccion: str, estado_partida_id: int):
+    seleccionadas = set(st.session_state.get(clave_seleccion, []))
+    if estado_partida_id in seleccionadas:
+        seleccionadas.remove(estado_partida_id)
+    else:
+        seleccionadas.add(estado_partida_id)
+    st.session_state[clave_seleccion] = sorted(seleccionadas)
+
+
+def guardar_accion_terreno(
+    *,
+    clave_seleccion: str,
+    nuevo_estado: str,
+    usuario: dict,
+):
+    seleccionadas = st.session_state.get(clave_seleccion, [])
+    try:
+        resultado = actualizar_estados_partidas(
+            estado_partida_ids=seleccionadas,
+            nuevo_estado=nuevo_estado,
+            usuario_id=usuario["id"],
+            comentario="",
+        )
+        st.session_state[clave_seleccion] = []
+        st.session_state["terreno_mensaje"] = "Cambios guardados"
+        st.session_state["terreno_actualizadas"] = resultado["actualizadas"]
+        st.rerun()
+    except (ValueError, sqlite3.IntegrityError) as error:
+        st.error(mensaje_amigable(error))
+
+
 def mostrar_terreno():
     st.title("Avance en terreno")
     st.caption("Actualización rápida desde celular.")
@@ -1139,9 +1318,26 @@ def mostrar_terreno():
         if mostrar_terminadas or partida["estado"] not in estados_ocultos
     ]
 
+    mensaje = st.session_state.pop("terreno_mensaje", None)
+    actualizadas = st.session_state.pop("terreno_actualizadas", None)
+    if mensaje:
+        detalle = f" ({actualizadas} partidas)" if actualizadas is not None else ""
+        st.success(f"{mensaje}{detalle}.")
+
     if not partidas_visibles:
         st.success("No hay partidas pendientes en este recinto.")
         return
+
+    clave_seleccion = f"terreno_seleccion_{departamento_id}_{nombre_recinto}"
+    seleccion_validas = {
+        partida["estado_partida_id"]
+        for partida in partidas_visibles
+    }
+    st.session_state[clave_seleccion] = [
+        identificador
+        for identificador in st.session_state.get(clave_seleccion, [])
+        if identificador in seleccion_validas
+    ]
 
     if es_solo_lectura(usuario):
         st.info("El usuario activo es solo lectura; no puede modificar partidas.")
@@ -1149,78 +1345,70 @@ def mostrar_terreno():
             with st.container(border=True):
                 st.markdown(f'**{partida["partida"]}**')
                 st.caption(estado_partida_legible(partida["estado"]))
+                st.write(f'Especialidad: {partida.get("especialidad") or "Sin especialidad"}')
+                st.write(
+                    "Depende de: "
+                    + texto_dependencias_partida(nombre_recinto, partida["partida"])
+                )
         return
 
-    opciones_estado = opciones_estado_para_usuario(usuario)
-    responsable_por_nombre = {
-        responsable["nombre"]: responsable["id"]
-        for responsable in listar_responsables()
-    }
-    opciones_partidas = {
-        f'{partida["partida"]} · {estado_partida_legible(partida["estado"])}':
-        partida["estado_partida_id"]
-        for partida in partidas_visibles
-    }
+    seleccionadas = set(st.session_state.get(clave_seleccion, []))
+    st.markdown("#### Partidas pendientes")
+    st.caption("Toca una tarjeta para seleccionarla.")
 
-    with st.form("form_terreno_actualizar"):
-        st.markdown("#### Partidas")
-        partidas_elegidas = st.multiselect(
-            "Selecciona partidas",
-            list(opciones_partidas),
-            placeholder="Elige una o varias",
-        )
-        nuevo_estado_etiqueta = st.selectbox(
-            "Nuevo estado",
-            list(opciones_estado),
-        )
-        nuevo_estado = opciones_estado[nuevo_estado_etiqueta]
-
-        comentario = st.text_area(
-            "Comentario",
-            placeholder="Obligatorio para Observada y Bloqueada.",
-        )
-
-        causa = ""
-        responsable_id = None
-        fecha_compromiso = None
-        if nuevo_estado == "bloqueada":
-            causa = st.text_input("Causa")
-            responsable = st.selectbox(
-                "Responsable",
-                ["Sin seleccionar", *responsable_por_nombre],
-            )
-            responsable_id = responsable_por_nombre.get(responsable)
-            fecha_compromiso = st.date_input(
-                "Fecha compromiso",
-                value=date.today() + timedelta(days=7),
-                format="DD/MM/YYYY",
-            )
-
-        guardar = st.form_submit_button("Guardar cambios", type="primary")
-
-    if guardar:
-        try:
-            resultado = actualizar_estados_partidas(
-                estado_partida_ids=[
-                    opciones_partidas[etiqueta] for etiqueta in partidas_elegidas
-                ],
-                nuevo_estado=nuevo_estado,
-                usuario_id=usuario["id"],
-                causa=causa,
-                responsable_id=responsable_id,
-                fecha_compromiso=fecha_compromiso,
-                comentario=comentario,
-            )
-            st.success(f'Se actualizaron {resultado["actualizadas"]} partidas.')
-            st.rerun()
-        except (ValueError, sqlite3.IntegrityError) as error:
-            st.error(mensaje_amigable(error))
-
-    st.markdown("#### Pendientes visibles")
     for partida in partidas_visibles:
+        estado_partida_id = partida["estado_partida_id"]
+        seleccionada = estado_partida_id in seleccionadas
+        etiqueta_boton = "Seleccionada" if seleccionada else "Seleccionar"
+        tipo_boton = "primary" if seleccionada else "secondary"
+
         with st.container(border=True):
             st.markdown(f'**{partida["partida"]}**')
             st.caption(estado_partida_legible(partida["estado"]))
+            st.write(f'Especialidad: {partida.get("especialidad") or "Sin especialidad"}')
+            st.write(
+                "Depende de: "
+                + texto_dependencias_partida(nombre_recinto, partida["partida"])
+            )
+            st.button(
+                etiqueta_boton,
+                key=f"terreno_toggle_{departamento_id}_{estado_partida_id}",
+                type=tipo_boton,
+                width="stretch",
+                on_click=alternar_partida_terreno,
+                args=(clave_seleccion, estado_partida_id),
+            )
+
+    seleccionadas = st.session_state.get(clave_seleccion, [])
+    st.markdown(f"**Seleccionadas:** {len(seleccionadas)}")
+
+    acciones = st.columns(2 if usuario["rol"] == "Administrador" else 1)
+    with acciones[0]:
+        if st.button(
+            "Marcar como Terminada",
+            type="primary",
+            width="stretch",
+            disabled=not seleccionadas,
+        ):
+            guardar_accion_terreno(
+                clave_seleccion=clave_seleccion,
+                nuevo_estado="terminada",
+                usuario=usuario,
+            )
+
+    if usuario["rol"] == "Administrador":
+        with acciones[1]:
+            if st.button(
+                "Verificar",
+                type="primary",
+                width="stretch",
+                disabled=not seleccionadas,
+            ):
+                guardar_accion_terreno(
+                    clave_seleccion=clave_seleccion,
+                    nuevo_estado="verificada",
+                    usuario=usuario,
+                )
 
 
 def mostrar_configuracion():
@@ -1236,6 +1424,7 @@ def mostrar_configuracion():
             "5. Responsables",
             "6. Carga Montevista V1",
             "7. Dependencias críticas",
+            "8. Importar avance",
         ]
     )
 
@@ -1768,6 +1957,73 @@ def mostrar_configuracion():
                         st.rerun()
                     except (ValueError, sqlite3.IntegrityError) as error:
                         st.error(mensaje_amigable(error))
+
+    with pestanas[7]:
+        st.subheader("Importacion inicial de avance")
+        st.caption(
+            "Descarga la plantilla, completa los estados existentes y vuelve a "
+            "cargar el archivo. No se crean departamentos, recintos ni partidas."
+        )
+
+        plantilla = obtener_plantilla_importacion_avance()
+        if plantilla:
+            st.download_button(
+                "Descargar plantilla Excel",
+                data=crear_excel_descarga(plantilla),
+                file_name="plantilla_avance_inicial.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                width="stretch",
+            )
+        else:
+            st.info("No hay partidas configuradas para generar la plantilla.")
+
+        usuario_importacion = st.session_state.get("usuario_activo")
+        if usuario_importacion is None:
+            st.warning("Configura un usuario activo antes de importar avance.")
+            return
+        if es_solo_lectura(usuario_importacion):
+            st.info("El usuario activo es solo lectura; no puede importar avance.")
+            return
+
+        archivo_excel = st.file_uploader(
+            "Importar Excel",
+            type=["xlsx"],
+            accept_multiple_files=False,
+        )
+        if archivo_excel is not None:
+            try:
+                datos_excel = pd.read_excel(archivo_excel, dtype=str).fillna("")
+                registros_excel = datos_excel.to_dict(orient="records")
+                if st.button("Validar e importar", type="primary", width="stretch"):
+                    resultado = importar_avance_desde_filas(
+                        registros_excel,
+                        usuario_importacion["id"],
+                    )
+                    columnas = st.columns(3)
+                    columnas[0].metric(
+                        "Filas procesadas",
+                        resultado["filas_procesadas"],
+                    )
+                    columnas[1].metric(
+                        "Filas actualizadas",
+                        resultado["filas_actualizadas"],
+                    )
+                    columnas[2].metric(
+                        "Filas con error",
+                        resultado["filas_con_error"],
+                    )
+                    if resultado["errores"]:
+                        st.error(
+                            "Se detectaron errores. Esas filas no fueron actualizadas."
+                        )
+                        mostrar_tabla(resultado["errores"], "")
+                    else:
+                        st.success("Importacion completada sin errores.")
+            except Exception as error:
+                st.error(mensaje_amigable(error))
 
 
 def mostrar_problemas():
@@ -2673,6 +2929,125 @@ st.markdown(
         background: var(--cop-primary);
     }
 
+    .cop-hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(17rem, .8fr);
+        gap: 24px;
+        align-items: stretch;
+        background: var(--cop-card);
+        border: 1px solid var(--cop-border);
+        border-radius: var(--cop-radius-lg);
+        box-shadow: var(--cop-shadow);
+        padding: 24px;
+        margin-bottom: 24px;
+    }
+    .cop-kicker {
+        color: var(--cop-primary);
+        font-size: .78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .08em;
+    }
+    .cop-hero h1 {
+        margin: 4px 0 8px;
+    }
+    .cop-hero p {
+        margin: 0;
+        max-width: 42rem;
+    }
+    .cop-context-grid {
+        display: grid;
+        gap: 10px;
+    }
+    .cop-context-grid div,
+    .cop-action-card,
+    .cop-dept-card {
+        background: #FFFFFF;
+        border: 1px solid var(--cop-border);
+        border-radius: var(--cop-radius);
+    }
+    .cop-context-grid div {
+        padding: 12px 14px;
+    }
+    .cop-context-grid span,
+    .cop-action-card span,
+    .cop-dept-card small,
+    .cop-dept-card__meta {
+        color: var(--cop-muted);
+        font-size: .82rem;
+        font-weight: 500;
+    }
+    .cop-context-grid strong {
+        display: block;
+        color: var(--cop-text);
+        margin-top: 2px;
+    }
+    .cop-action-card {
+        min-height: 11.5rem;
+        padding: 18px;
+        box-shadow: var(--cop-shadow);
+    }
+    .cop-action-card strong {
+        display: block;
+        color: var(--cop-text);
+        font-size: 2rem;
+        line-height: 1;
+        margin: 12px 0;
+    }
+    .cop-action-card p {
+        min-height: 2.6rem;
+        margin: 0 0 12px;
+    }
+    .cop-action-card em,
+    .cop-dept-card em {
+        color: var(--cop-primary);
+        font-style: normal;
+        font-weight: 700;
+    }
+    .cop-dept-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+        gap: 14px;
+        margin: 8px 0 24px;
+    }
+    .cop-dept-card {
+        border-left: 5px solid var(--cop-gray);
+        padding: 16px;
+        box-shadow: var(--cop-shadow);
+    }
+    .cop-dept-card__top,
+    .cop-dept-card__meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+    }
+    .cop-dept-card__top span {
+        border-radius: 999px;
+        padding: 4px 9px;
+        background: var(--cop-bg-soft);
+        color: var(--cop-text);
+        font-size: .76rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+    .cop-dept-card__progress {
+        margin: 16px 0 12px;
+    }
+    .cop-dept-card__progress b {
+        color: var(--cop-text);
+        font-size: 1.8rem;
+        line-height: 1;
+    }
+    .cop-dept-card__progress small {
+        display: block;
+        margin-top: 4px;
+    }
+    .cop-dept-card.is-ready { border-left-color: var(--cop-green); }
+    .cop-dept-card.is-blocked { border-left-color: var(--cop-red); }
+    .cop-dept-card.is-risk { border-left-color: var(--cop-yellow); }
+    .cop-dept-card.is-progress { border-left-color: var(--cop-primary); }
+
     .leyenda-semaforo {
         display: flex;
         flex-wrap: wrap;
@@ -2750,6 +3125,16 @@ st.markdown(
         margin-top: .16rem;
     }
     @media (max-width: 700px) {
+        .cop-hero {
+            grid-template-columns: 1fr;
+            padding: 18px;
+        }
+        .cop-action-card {
+            min-height: auto;
+        }
+        .cop-dept-grid {
+            grid-template-columns: 1fr;
+        }
         .fila-nivel { grid-template-columns: 1fr; }
         .nombre-nivel {
             border-right: 0;

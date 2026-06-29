@@ -41,11 +41,13 @@ from database.servicios import (
     obtener_ficha_dashboard_departamento,
     obtener_historial_partidas_departamento,
     obtener_historial_restriccion,
+    obtener_plantilla_importacion_avance,
     obtener_partidas_por_especialidad,
     obtener_pendientes_por_especialidad,
     obtener_resumen_pendientes_especialidad,
     obtener_resumen_dashboard,
     obtener_resumen_pisos,
+    importar_avance_desde_filas,
     preparar_base,
 )
 
@@ -1026,6 +1028,56 @@ class ServiciosTest(unittest.TestCase):
         self.assertEqual(avance["avance_oficial_porcentaje"], 50)
         self.assertEqual(avance["avance_declarado_porcentaje"], 100)
         self.assertEqual(avance["estado_operativo"], "en_proceso")
+
+    def test_importacion_avance_actualiza_solo_filas_validas(self):
+        obra_id = crear_obra("Obra", self.ruta_db)
+        torre_id = crear_torre(obra_id, "A", self.ruta_db)
+        crear_departamentos(torre_id, [(1, "101")], self.ruta_db)
+        usuario_id = crear_usuario("Ana", "Administrador", self.ruta_db)
+        tipologia_id = crear_tipologia("1D", ["Living"], self.ruta_db)
+        departamento_id = listar_departamentos_seleccionables(
+            self.ruta_db
+        )[0]["id"]
+        asignar_tipologia_departamento(
+            departamento_id,
+            tipologia_id,
+            self.ruta_db,
+        )
+        recinto_id = listar_recintos_tipologia(
+            tipologia_id,
+            self.ruta_db,
+        )[0]["id"]
+        partida = listar_catalogo("partidas", self.ruta_db)[0]
+        configurar_partidas_tipologia(
+            recinto_id,
+            [partida["id"]],
+            self.ruta_db,
+        )
+
+        plantilla = obtener_plantilla_importacion_avance(self.ruta_db)
+        self.assertEqual(len(plantilla), 1)
+
+        fila_valida = dict(plantilla[0])
+        fila_valida["estado"] = "terminada"
+        fila_valida["comentario"] = "Carga inicial"
+        fila_valida["fecha_actualizacion"] = "2026-06-29"
+
+        fila_invalida = dict(fila_valida)
+        fila_invalida["departamento"] = "999"
+
+        resultado = importar_avance_desde_filas(
+            [fila_valida, fila_invalida],
+            usuario_id,
+            self.ruta_db,
+        )
+
+        self.assertEqual(resultado["filas_procesadas"], 2)
+        self.assertEqual(resultado["filas_actualizadas"], 1)
+        self.assertEqual(resultado["filas_con_error"], 1)
+
+        avance = obtener_avance_departamento(departamento_id, self.ruta_db)
+        self.assertEqual(avance["avance_declarado_porcentaje"], 100)
+        self.assertEqual(avance["partidas"][0]["estado"], "terminada")
 
     def test_avance_ponderado_deriva_obligatoriedad_de_aplicabilidad(self):
         obra_id = crear_obra("Obra", self.ruta_db)

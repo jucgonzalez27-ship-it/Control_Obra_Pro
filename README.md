@@ -1,16 +1,22 @@
-# Control Obra Pro
+# CopBuilder
 
-Control Obra Pro es una aplicacion Streamlit para controlar avance operativo de departamentos en obra: partidas, recintos, bloqueos, restricciones, reportes e historial.
+CopBuilder es una aplicacion Streamlit para controlar avance operativo de departamentos en obra: recintos, partidas, bloqueos, restricciones, reportes, historial y trabajo en terreno.
 
-La aplicacion esta preparada para ejecutarse localmente o en Streamlit Cloud. Si no existe una base local, el sistema crea el esquema inicial automaticamente al iniciar.
+El punto de entrada de la aplicacion es:
+
+```text
+app.py
+```
+
+La app esta preparada para ejecutarse localmente o en Streamlit Cloud. Si no existe una base SQLite local, el sistema inicializa automaticamente el esquema vacio al arrancar.
 
 ## Requisitos
 
 - Python 3.11 o superior.
 - Git.
-- Acceso local al repositorio.
+- Dependencias definidas en `requirements.txt`.
 
-## Instalacion
+## Instalacion Local
 
 Crear y activar un entorno virtual:
 
@@ -26,7 +32,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## Ejecucion local
+## Ejecucion Local
 
 Iniciar la aplicacion:
 
@@ -40,7 +46,7 @@ Abrir en el navegador:
 http://localhost:8501
 ```
 
-## Ejecucion en red local para celular
+## Ejecucion En Red Local Para Celular
 
 Iniciar Streamlit escuchando en la red local:
 
@@ -60,13 +66,42 @@ Desde el celular, conectado a la misma red Wi-Fi, abrir:
 http://IP_DEL_COMPUTADOR:8501
 ```
 
-Ejemplo:
+Si no carga desde el celular, revisar el firewall de Windows y permitir Python/Streamlit en redes privadas.
+
+## Streamlit Cloud
+
+Para desplegar en Streamlit Cloud:
+
+1. Subir el repositorio a GitHub sin archivos `.db`, `.sqlite` ni respaldos de bases reales.
+2. Crear una nueva app en Streamlit Cloud.
+3. Seleccionar el repositorio de GitHub.
+4. Configurar `app.py` como archivo principal.
+5. Confirmar que `requirements.txt` esta en la raiz del repositorio.
+6. Desplegar.
+
+No subir `.streamlit/secrets.toml`. Si se requieren secretos en el futuro, configurarlos desde el panel de Streamlit Cloud.
+
+## Base De Datos
+
+No subir bases SQLite reales al repositorio.
+
+Archivos como los siguientes deben permanecer solo en el equipo local:
 
 ```text
-http://192.168.1.50:8501
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
 ```
 
-Si no carga desde el celular, revisar firewall de Windows y permitir Python/Streamlit en redes privadas.
+Si `obra_v01.db` no existe, CopBuilder crea automaticamente una base vacia con el esquema inicial. Luego se puede cargar configuracion y datos desde la propia app.
+
+## Limitacion Actual De Persistencia
+
+SQLite local sirve para beta, demo y pruebas controladas.
+
+Para uso real multiusuario desde internet se recomienda migrar la persistencia a PostgreSQL o Supabase. Streamlit Cloud puede reiniciar el entorno y no debe considerarse almacenamiento definitivo para operacion productiva con multiples usuarios.
 
 ## Tests
 
@@ -76,72 +111,35 @@ Ejecutar todas las pruebas:
 python -m unittest discover -v
 ```
 
-Validar sintaxis de la app:
+Validar sintaxis:
 
 ```powershell
-python -m py_compile app.py
+python -m py_compile app.py database\servicios.py
 ```
 
-## Base de datos local
-
-No subir bases reales al repositorio.
-
-Archivos como los siguientes deben permanecer solo en el equipo local:
-
-```text
-*.db
-*.sqlite
-*.sqlite3
-```
-
-La base operativa local se crea automaticamente si no existe. Para una prueba piloto limpia, iniciar la app sin copiar una base real al repositorio.
-
-## Streamlit Cloud
-
-Para desplegar en Streamlit Cloud:
-
-1. Subir el repositorio a GitHub sin archivos `.db`.
-2. Crear una nueva app en Streamlit Cloud.
-3. Seleccionar el repositorio.
-4. Usar `app.py` como archivo principal.
-5. Verificar que `requirements.txt` este en la raiz del repositorio.
-6. Desplegar.
-
-No subir `.streamlit/secrets.toml`. Si se requieren secretos en el futuro, configurarlos desde el panel de Streamlit Cloud.
-
-## Subir a GitHub
+## Checklist Antes De Subir A GitHub
 
 Revisar estado local:
 
 ```powershell
-git status
+git status --short --ignored
 ```
 
-Confirmar que no aparezcan bases reales:
+Confirmar que las bases reales aparecen como ignoradas y no como archivos a subir.
+
+Agregar archivos versionables:
 
 ```powershell
-git status --short
-```
-
-Agregar archivos del proyecto:
-
-```powershell
-git add .
+git add .gitignore README.md requirements.txt app.py database tests docs
 ```
 
 Crear commit:
 
 ```powershell
-git commit -m "Preparar Control Obra Pro para piloto"
+git commit -m "Preparar CopBuilder para Streamlit Cloud"
 ```
 
-Crear repositorio en GitHub y asociar remoto:
-
-```powershell
-git remote add origin https://github.com/USUARIO/REPOSITORIO.git
-```
-
-Subir:
+Subir a GitHub:
 
 ```powershell
 git push -u origin main
