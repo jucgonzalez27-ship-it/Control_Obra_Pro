@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+.streamlit/secrets.toml
+
+streamlit-test.*
+streamlit-*.out
+streamlit-*.err
+streamlit-dev.*
+
+# Bases locales con informacion operativa.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite
+data/*.sqlite3
