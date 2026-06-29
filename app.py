@@ -1,4 +1,4 @@
-﻿"""Interfaz web de Control Obra Pro."""
+"""Interfaz web de Control Obra Pro."""
 
 import sqlite3
 from datetime import date, timedelta
@@ -68,7 +68,7 @@ from presentacion import clave_numero_departamento, estado_corto, nombre_del_niv
 
 
 st.set_page_config(
-    page_title="Control Obra Pro",
+    page_title="CopBuilder",
     page_icon="COP",
     layout="wide",
 )
@@ -149,12 +149,24 @@ def descargar_csv(registros: list[dict], nombre_archivo: str):
         data=csv,
         file_name=nombre_archivo,
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
+    )
+
+
+def mostrar_marca_sidebar():
+    st.sidebar.markdown(
+        """
+        <div class="cop-sidebar-brand">
+            <div class="cop-sidebar-logo">CopBuilder</div>
+            <div class="cop-sidebar-subtitle">Construction Operations Platform</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
 def mostrar_inicio():
-    st.title("Control Obra Pro")
+    st.title("CopBuilder")
     st.caption("Dashboard operativo de avance, bloqueos y liberación")
 
     resumen_dashboard = obtener_resumen_dashboard()
@@ -469,7 +481,7 @@ def mostrar_ficha_dashboard(departamento_id: int):
     if ficha["proxima_fecha"]:
         st.write(f'**Próxima fecha compromiso:** {ficha["proxima_fecha"]}')
 
-    if st.button("Actualizar partidas", type="primary", use_container_width=True):
+    if st.button("Actualizar partidas", type="primary", width="stretch"):
         st.session_state["departamento_avance_id"] = departamento_id
         st.session_state["departamentos_vista"] = "ficha"
         st.session_state["pagina"] = "Departamentos"
@@ -485,7 +497,7 @@ def mostrar_ficha_dashboard(departamento_id: int):
             if st.button(
                 "Liberar departamento",
                 key=f"liberar_{departamento_id}",
-                use_container_width=True,
+                width="stretch",
             ):
                 try:
                     liberar_departamento(
@@ -773,7 +785,7 @@ def mostrar_departamentos_lista():
                     "Abrir ficha",
                     key=f'abrir_ficha_{ficha["departamento_id"]}',
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state["departamento_avance_id"] = ficha["departamento_id"]
                     st.session_state["departamentos_vista"] = "ficha"
@@ -825,7 +837,7 @@ def mostrar_departamento_ficha(departamento_id: int):
                 if st.button(
                     "Abrir recinto",
                     key=f'abrir_recinto_{departamento_id}_{recinto["nombre"]}',
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state["departamento_recinto"] = recinto["nombre"]
                     st.session_state["departamentos_vista"] = "recinto"
@@ -1037,6 +1049,178 @@ def mostrar_departamento_recinto(departamento_id: int, nombre_recinto: str):
                                     clave_fecha,
                                 ),
                             )
+
+
+def opciones_estado_para_usuario(usuario: dict) -> dict[str, str]:
+    opciones = dict(ETIQUETAS_ESTADO_PARTIDA)
+    if usuario["rol"] != "Administrador":
+        opciones.pop("Verificada", None)
+        opciones.pop("No aplica", None)
+    return opciones
+
+
+def mostrar_terreno():
+    st.title("Avance en terreno")
+    st.caption("Actualización rápida desde celular.")
+
+    usuario = st.session_state.get("usuario_activo")
+    if usuario is None:
+        st.warning("Configura al menos un usuario antes de actualizar partidas.")
+        return
+
+    departamentos = listar_departamentos_seleccionables()
+    if not departamentos:
+        st.info("Todavía no hay departamentos configurados.")
+        return
+
+    pisos = sorted({departamento["piso"] for departamento in departamentos})
+    piso_actual = st.selectbox(
+        "Piso",
+        pisos,
+        format_func=nombre_del_nivel,
+        key="terreno_piso",
+    )
+    departamentos_piso = [
+        departamento
+        for departamento in departamentos
+        if departamento["piso"] == piso_actual
+    ]
+    departamentos_piso = sorted(
+        departamentos_piso,
+        key=lambda departamento: clave_numero_departamento(departamento["numero"]),
+    )
+    departamento_por_numero = {
+        departamento["numero"]: departamento["id"]
+        for departamento in departamentos_piso
+    }
+    numero_departamento = st.selectbox(
+        "Departamento",
+        list(departamento_por_numero),
+        key=f"terreno_departamento_{piso_actual}",
+    )
+    departamento_id = departamento_por_numero[numero_departamento]
+
+    try:
+        ficha = normalizar_ficha_departamento(
+            obtener_avance_departamento(departamento_id)
+        )
+    except ValueError as error:
+        st.warning(str(error))
+        return
+
+    recintos = recintos_ordenados(ficha["partidas"])
+    if not recintos:
+        st.info("El departamento no tiene recintos configurados.")
+        return
+
+    recinto_por_nombre = {recinto["nombre"]: recinto for recinto in recintos}
+    nombre_recinto = st.selectbox(
+        "Recinto",
+        list(recinto_por_nombre),
+        key=f"terreno_recinto_{departamento_id}",
+    )
+    recinto = recinto_por_nombre[nombre_recinto]
+
+    metricas = st.columns(2)
+    metricas[0].metric("Depto", f'{ficha["avance_general"]}%')
+    metricas[1].metric("Recinto", f'{recinto["avance"]}%')
+    st.progress(recinto["avance"] / 100)
+
+    clave_terminadas = f"terreno_mostrar_terminadas_{departamento_id}_{nombre_recinto}"
+    mostrar_terminadas = st.toggle(
+        "Mostrar terminadas",
+        value=st.session_state.get(clave_terminadas, False),
+        key=clave_terminadas,
+    )
+    estados_ocultos = {"terminada", "verificada", "no_aplica"}
+    partidas_visibles = [
+        partida
+        for partida in recinto["partidas"]
+        if mostrar_terminadas or partida["estado"] not in estados_ocultos
+    ]
+
+    if not partidas_visibles:
+        st.success("No hay partidas pendientes en este recinto.")
+        return
+
+    if es_solo_lectura(usuario):
+        st.info("El usuario activo es solo lectura; no puede modificar partidas.")
+        for partida in partidas_visibles:
+            with st.container(border=True):
+                st.markdown(f'**{partida["partida"]}**')
+                st.caption(estado_partida_legible(partida["estado"]))
+        return
+
+    opciones_estado = opciones_estado_para_usuario(usuario)
+    responsable_por_nombre = {
+        responsable["nombre"]: responsable["id"]
+        for responsable in listar_responsables()
+    }
+    opciones_partidas = {
+        f'{partida["partida"]} · {estado_partida_legible(partida["estado"])}':
+        partida["estado_partida_id"]
+        for partida in partidas_visibles
+    }
+
+    with st.form("form_terreno_actualizar"):
+        st.markdown("#### Partidas")
+        partidas_elegidas = st.multiselect(
+            "Selecciona partidas",
+            list(opciones_partidas),
+            placeholder="Elige una o varias",
+        )
+        nuevo_estado_etiqueta = st.selectbox(
+            "Nuevo estado",
+            list(opciones_estado),
+        )
+        nuevo_estado = opciones_estado[nuevo_estado_etiqueta]
+
+        comentario = st.text_area(
+            "Comentario",
+            placeholder="Obligatorio para Observada y Bloqueada.",
+        )
+
+        causa = ""
+        responsable_id = None
+        fecha_compromiso = None
+        if nuevo_estado == "bloqueada":
+            causa = st.text_input("Causa")
+            responsable = st.selectbox(
+                "Responsable",
+                ["Sin seleccionar", *responsable_por_nombre],
+            )
+            responsable_id = responsable_por_nombre.get(responsable)
+            fecha_compromiso = st.date_input(
+                "Fecha compromiso",
+                value=date.today() + timedelta(days=7),
+                format="DD/MM/YYYY",
+            )
+
+        guardar = st.form_submit_button("Guardar cambios", type="primary")
+
+    if guardar:
+        try:
+            resultado = actualizar_estados_partidas(
+                estado_partida_ids=[
+                    opciones_partidas[etiqueta] for etiqueta in partidas_elegidas
+                ],
+                nuevo_estado=nuevo_estado,
+                usuario_id=usuario["id"],
+                causa=causa,
+                responsable_id=responsable_id,
+                fecha_compromiso=fecha_compromiso,
+                comentario=comentario,
+            )
+            st.success(f'Se actualizaron {resultado["actualizadas"]} partidas.')
+            st.rerun()
+        except (ValueError, sqlite3.IntegrityError) as error:
+            st.error(mensaje_amigable(error))
+
+    st.markdown("#### Pendientes visibles")
+    for partida in partidas_visibles:
+        with st.container(border=True):
+            st.markdown(f'**{partida["partida"]}**')
+            st.caption(estado_partida_legible(partida["estado"]))
 
 
 def mostrar_configuracion():
@@ -1431,7 +1615,7 @@ def mostrar_configuracion():
         if st.button(
             "Cargar configuración Montevista V1",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 resultado = cargar_configuracion_v1(crear_respaldo=True)
@@ -1575,7 +1759,7 @@ def mostrar_configuracion():
                     opciones,
                     key="dependencia_desactivar",
                 )
-                if st.button("Desactivar dependencia", use_container_width=True):
+                if st.button("Desactivar dependencia", width="stretch"):
                     try:
                         desactivar_dependencia_critica(
                             opciones[dependencia_elegida]
@@ -1718,7 +1902,7 @@ def mostrar_problemas():
     if problemas:
         tabla = pd.DataFrame(problemas)
         tabla["bloquea_entrega"] = tabla["bloquea_entrega"].map({1: "Si", 0: "No"})
-        st.dataframe(tabla, use_container_width=True, hide_index=True)
+        st.dataframe(tabla, width="stretch", hide_index=True)
     else:
         st.write("Todavia no hay problemas registrados.")
 
@@ -1950,7 +2134,7 @@ def mostrar_levantamiento():
             for partida in partidas_recinto
         ]
     )
-    st.dataframe(tabla, use_container_width=True, hide_index=True)
+    st.dataframe(tabla, width="stretch", hide_index=True)
 
     advertencias_dependencias = obtener_advertencias_dependencias_departamento(
         departamento_id,
@@ -2085,7 +2269,7 @@ def mostrar_levantamiento():
                 for movimiento in historial
             ]
         )
-        st.dataframe(tabla_historial, use_container_width=True, hide_index=True)
+        st.dataframe(tabla_historial, width="stretch", hide_index=True)
     else:
         st.write("Todavía no hay cambios registrados para este departamento.")
 
@@ -2253,7 +2437,7 @@ def mostrar_tabla(registros: list[dict], mensaje_vacio: str):
     if registros:
         st.dataframe(
             pd.DataFrame(registros),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -2274,6 +2458,7 @@ def indice_departamento_preseleccionado(
 
 paginas = [
     "Inicio",
+    "Terreno",
     "Departamentos",
     "Problemas",
     "Seguimiento",
@@ -2281,6 +2466,7 @@ paginas = [
     "Configuración",
 ]
 pagina_actual = st.session_state.get("pagina", "Inicio")
+mostrar_marca_sidebar()
 pagina = st.sidebar.radio(
     "Navegación",
     paginas,
@@ -2291,6 +2477,8 @@ st.session_state["usuario_activo"] = obtener_usuario_activo()
 
 if pagina == "Inicio":
     mostrar_inicio()
+elif pagina == "Terreno":
+    mostrar_terreno()
 elif pagina == "Departamentos":
     mostrar_departamentos()
 elif pagina == "Problemas":
@@ -2306,70 +2494,252 @@ else:
 st.markdown(
     """
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    :root {
+        --cop-bg: #F5F7FA;
+        --cop-bg-soft: #EEF2F7;
+        --cop-card: #FFFFFF;
+        --cop-border: #E5E7EB;
+        --cop-text: #1F2937;
+        --cop-muted: #6B7280;
+        --cop-primary: #2563EB;
+        --cop-green: #16A34A;
+        --cop-yellow: #F59E0B;
+        --cop-red: #DC2626;
+        --cop-gray: #9CA3AF;
+        --cop-sidebar: #111827;
+        --cop-radius: 12px;
+        --cop-radius-lg: 16px;
+        --cop-shadow: 0 8px 24px rgba(15, 23, 42, .06);
+    }
+
+    html, body, [class*="css"] {
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .stApp {
+        background: var(--cop-bg);
+        color: var(--cop-text);
+    }
+
+    .main .block-container {
+        max-width: 1280px;
+        padding-top: 48px;
+        padding-bottom: 48px;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+        color: var(--cop-text);
+        letter-spacing: 0;
+    }
+
+    h1 {
+        font-size: 2.15rem;
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+
+    h2, h3 {
+        font-weight: 700;
+    }
+
+    p, label, .stCaption, [data-testid="stCaptionContainer"] {
+        color: var(--cop-muted);
+    }
+
+    section[data-testid="stSidebar"] {
+        background: var(--cop-sidebar);
+        border-right: 1px solid rgba(255, 255, 255, .08);
+    }
+
+    section[data-testid="stSidebar"] * {
+        color: #F9FAFB;
+    }
+
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] .stCaption {
+        color: #D1D5DB;
+    }
+
+    .cop-sidebar-brand {
+        padding: 8px 0 24px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, .10);
+    }
+
+    .cop-sidebar-logo {
+        color: #FFFFFF;
+        font-size: 1.18rem;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+
+    .cop-sidebar-subtitle {
+        color: #9CA3AF;
+        font-size: .76rem;
+        font-weight: 500;
+        margin-top: 4px;
+    }
+
+    section[data-testid="stSidebar"] [role="radiogroup"] label {
+        border-radius: var(--cop-radius);
+        padding: 8px 10px;
+        transition: background-color 160ms ease, color 160ms ease;
+    }
+
+    section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+        background: rgba(255, 255, 255, .08);
+    }
+
+    [data-testid="stMetric"],
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: var(--cop-card);
+        border: 1px solid var(--cop-border);
+        border-radius: var(--cop-radius-lg);
+        box-shadow: var(--cop-shadow);
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        padding: 16px;
+    }
+
+    [data-testid="stMetric"] {
+        padding: 16px;
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: var(--cop-muted);
+        font-weight: 500;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: var(--cop-text);
+        font-weight: 700;
+    }
+
+    .stButton > button,
+    .stDownloadButton > button,
+    button[kind="primary"] {
+        min-height: 42px;
+        border-radius: var(--cop-radius);
+        border: 1px solid var(--cop-border);
+        font-weight: 600;
+        transition: background-color 160ms ease, border-color 160ms ease, transform 160ms ease;
+    }
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        border-color: var(--cop-primary);
+        transform: translateY(-1px);
+    }
+
+    .stButton > button[kind="primary"],
+    .stFormSubmitButton > button[kind="primary"],
+    button[kind="primary"] {
+        background: var(--cop-primary);
+        border-color: var(--cop-primary);
+        color: #FFFFFF;
+    }
+
+    input,
+    textarea,
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="base-input"] {
+        border-radius: var(--cop-radius) !important;
+    }
+
+    input:focus,
+    textarea:focus,
+    div[data-baseweb="select"] div:focus-within {
+        border-color: var(--cop-primary) !important;
+        box-shadow: 0 0 0 2px rgba(37, 99, 235, .14) !important;
+    }
+
+    [data-testid="stDataFrame"] {
+        border: 1px solid var(--cop-border);
+        border-radius: var(--cop-radius-lg);
+        overflow: hidden;
+        box-shadow: var(--cop-shadow);
+    }
+
+    .stAlert {
+        border-radius: var(--cop-radius);
+        border: 1px solid var(--cop-border);
+    }
+
+    .stProgress > div > div > div {
+        background: var(--cop-primary);
+    }
+
     .leyenda-semaforo {
         display: flex;
         flex-wrap: wrap;
-        gap: 1.25rem;
-        margin: .25rem 0 1rem;
-        color: #475569;
+        gap: 16px;
+        margin: 8px 0 16px;
+        color: var(--cop-muted);
         font-size: .9rem;
     }
     .leyenda-semaforo span {
         display: inline-flex;
         align-items: center;
-        gap: .4rem;
+        gap: 8px;
     }
     .punto {
-        width: .75rem;
-        height: .75rem;
+        width: 12px;
+        height: 12px;
         border-radius: 999px;
         display: inline-block;
     }
-    .punto.rojo { background: #ef4444; }
-    .punto.amarillo { background: #f59e0b; }
-    .punto.verde { background: #22c55e; }
-    .punto.azul { background: #3b82f6; }
-    .punto.gris { background: #94a3b8; }
+    .punto.rojo { background: var(--cop-red); }
+    .punto.amarillo { background: var(--cop-yellow); }
+    .punto.verde { background: var(--cop-green); }
+    .punto.azul { background: var(--cop-primary); }
+    .punto.gris { background: var(--cop-gray); }
     .matriz-torre {
-        border: 1px solid #e2e8f0;
-        border-radius: .75rem;
+        background: var(--cop-card);
+        border: 1px solid var(--cop-border);
+        border-radius: var(--cop-radius-lg);
         overflow: hidden;
-        margin-bottom: 1.5rem;
+        margin-bottom: 24px;
+        box-shadow: var(--cop-shadow);
     }
     .fila-nivel {
         display: grid;
         grid-template-columns: minmax(8.5rem, 10rem) 1fr;
-        border-bottom: 1px solid #e2e8f0;
+        border-bottom: 1px solid var(--cop-border);
         min-height: 5.25rem;
     }
     .fila-nivel:last-child { border-bottom: 0; }
     .nombre-nivel {
         display: flex;
         align-items: center;
-        padding: 1rem;
-        background: #f8fafc;
-        color: #334155;
+        padding: 16px;
+        background: var(--cop-bg-soft);
+        color: var(--cop-text);
         font-weight: 700;
-        border-right: 1px solid #e2e8f0;
+        border-right: 1px solid var(--cop-border);
     }
     .departamentos-nivel {
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: .65rem;
-        padding: .8rem 1rem;
+        gap: 12px;
+        padding: 16px;
     }
     .tarjeta-departamento {
         width: 6.5rem;
         min-height: 5.2rem;
         border: 1px solid;
         border-left-width: 5px;
-        border-radius: .5rem;
+        border-radius: var(--cop-radius);
         display: flex;
         flex-direction: column;
         justify-content: center;
-        padding: .45rem .6rem;
+        padding: 8px 12px;
         box-sizing: border-box;
+        box-shadow: 0 4px 12px rgba(15, 23, 42, .05);
     }
     .tarjeta-departamento strong {
         font-size: 1.05rem;
@@ -2383,10 +2753,13 @@ st.markdown(
         .fila-nivel { grid-template-columns: 1fr; }
         .nombre-nivel {
             border-right: 0;
-            border-bottom: 1px solid #e2e8f0;
-            padding: .6rem 1rem;
+            border-bottom: 1px solid var(--cop-border);
+            padding: 12px 16px;
         }
         .tarjeta-departamento { width: 5.8rem; }
+        .main .block-container {
+            padding: 24px 16px 32px;
+        }
     }
     </style>
     """,
